@@ -295,11 +295,11 @@ const uploadImageToLinkedIn = async (coverImage, connection, clientUrl) => {
  * Posts the article to LinkedIn.
  */
 const pushArticleToLinkedIn = async (article, connection, caption, job = null) => {
-  const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
+  const clientUrl = (process.env.CLIENT_URL || "http://localhost:3000").replace(/\/+$/, "");
 
   // Use snapshot from job if available, otherwise fallback to current article state
   const title = job?.title || article.title;
-  const articleUrl = `${clientUrl}/home/read?id=${article.id}`;
+  const articleUrl = `${clientUrl}/home/read/${article.id}`;
 
   // We use the modern 'v2/posts' API
   const postBody = {
