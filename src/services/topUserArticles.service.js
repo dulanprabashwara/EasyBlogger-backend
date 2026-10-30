@@ -6,7 +6,7 @@ const fetchTopUserArticles = async (userId) => {
 
   return await prisma.article.findMany({
     where: { 
-      status: "PUBLISHED",
+      status: { in: ["PUBLISHED", "REPUBLISHED"] },
       authorId: userId // Filters articles pertaining ONLY to the current user
     }, 
     orderBy: { trendingScore: "desc" },

@@ -87,7 +87,7 @@ const searchArticles = async ({ query, page = 1, limit = DEFAULT_SEARCH_LIMIT, c
   const q = (query || "").trim();
   if (!q) return { articles: [], total: 0, page, limit, totalPages: 0 };
 
-  const publishedFilter = { status: "PUBLISHED" };
+  const publishedFilter = { status: { in: ["PUBLISHED", "REPUBLISHED"] } };
   const exactWordRegex  = new RegExp(`\\b${escapeRegex(q)}\\b`, "i");
 
   const titleMatches = await prisma.article.findMany({

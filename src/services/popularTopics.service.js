@@ -7,8 +7,8 @@ const getPopularTags = async (limit = 10) => {
     FROM (
       SELECT unnest(tags) as tag
       FROM articles
-      WHERE status = 'PUBLISHED'
-      AND "publishedAt" >= NOW() - INTERVAL '100 days'
+      WHERE status = 'PUBLISHED' OR status = 'REPUBLISHED'
+      AND "publishedAt" >= NOW() - INTERVAL '14 days'
     ) as flattened_tags
     GROUP BY LOWER(tag)
     ORDER BY count DESC

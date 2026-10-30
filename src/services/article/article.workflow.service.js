@@ -79,14 +79,19 @@ async function publishArticle(app, articleId, userId, payload) {
     await incrementPublishedArticleCount(userId);
 }
 generateSummary (updatedArticle.id,userId).catch(console.error);
-await publishNotification(app, {
+
+//only if the articl eis a published one
+if (updatedArticle.status === ARTICLE_STATUS.PUBLISHED)
+{
+   await publishNotification(app, {
     type: "NEW_ARTICLE",
     destUserId: userId, 
     sourceUserId: userId,    
     sourceArticleId: updatedArticle.id   
   });
-notifyFollowersOfNewArticle(app, userId, updatedArticle.id).catch(console.error);
+await notifyFollowersOfNewArticle(app, userId, updatedArticle.id).catch(console.error);
 
+}
 
   return updatedArticle;
 }

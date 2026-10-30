@@ -4,7 +4,7 @@ const prisma = require("../config/prisma");
 const fetchTrendingTitles = async () => {
     const limit = 5;
   return await prisma.article.findMany({
-     where: { status: "PUBLISHED" },
+     where: {status: { in: ["PUBLISHED", "REPUBLISHED"] } },
     orderBy: { trendingScore: 'desc' },
     take: limit,
     select: {
@@ -23,7 +23,7 @@ const fetchTrendingArticles = async () => {
 const limit = 10;
 
 return await prisma.article.findMany({
-    where: { status: "PUBLISHED" }, 
+    where: { status: { in: ["PUBLISHED", "REPUBLISHED"] } }, 
     orderBy: { trendingScore: "desc" },
     take: limit,
     include: {

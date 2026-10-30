@@ -107,9 +107,9 @@ const fetchUserNotifications = async (userId) => {
   return await prisma.notification.findMany({
     where: { destUserId: userId },
     orderBy: { createdAt: "desc" },
-    take: 50,
+    
     include: {
-      sourceUser: { select: { username: true, displayName: true, avatarUrl: true } },
+      sourceUser: { select: { username: true, displayName: true, avatarUrl: true, } },
       sourceArticle: { select: { title: true, id: true } }
     }
   });

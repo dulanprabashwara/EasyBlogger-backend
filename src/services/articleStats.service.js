@@ -87,7 +87,7 @@ const getAuthorArticleStats = async (userId) => {
   return await prisma.article.findMany({
     where: {
       authorId: userId,
-      status: "PUBLISHED",
+      status: { in: ["PUBLISHED", "REPUBLISHED"] },
     },
     take:10,
     select: {
