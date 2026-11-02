@@ -4,7 +4,7 @@
  *
  * Handles the AI generation pipeline:
  *   - Session cache (short-lived in-memory store keyed by sessionId)
- *   - AI client + model fallback chain
+ *   - AI providers (Gemini → Groq → Mistral → OpenRouter) + fallback chain
  *   - analyzePrompt — extract topic + keywords from raw user input
  *   - generateArticle / regenerateArticle — produce + persist article logs
  */
@@ -40,49 +40,117 @@ const REFERENCE_KEYWORD_OFFSET_MULTIPLIER   = 7;
 // Summary excerpt length when saving/loading to the articles table
 const SUMMARY_EXCERPT_LENGTH = 200;
 
-// AI model fallback chain (tried in order; first success wins)
-const MODELS = [
-  "poolside/laguna-xs-2.1:free",
-   "tencent/hy3:free",
-  "openai/gpt-oss-120b:free",
-  "google/gemma-4-31b-it:free",
-  "google/gemma-4-26b-a4b-it:free",
-  "qwen/qwen3-next-80b-a3b-instruct:free",
- 
-  "openai/gpt-oss-20b:free",
-  "nousresearch/hermes-3-llama-3.1-405b:free",
-  "meta-llama/llama-3.3-70b-instruct:free",
-];
-
 const LENGTH_CONFIG = {
   short:        { min: 300,  max: 1000, label: "300 to 1000 words"   },
   "mid-length": { min: 1000, max: 2000, label: "1000 to 2000 words"  },
   long:         { min: 2000, max: 9999, label: "at least 2000 words" },
 };
 
-// ── AI client ──────────────────────────────────────────────────────────────────
+// ── AI providers ───────────────────────────────────────────────────────────────
+//
+// Providers are tried in this order; the first one that returns a usable
+// response wins:
+//   1. Google Gemini (AI Studio)  — free tier, no credit card
+//   2. Groq                       — free tier, no credit card
+//   3. Mistral (Experiment plan)  — free tier, phone verification only
+//   4. OpenRouter                 — last-resort fallback (free models)
+//
+// All four expose an OpenAI-compatible API, so one SDK handles them all.
+// A provider with no API key in the environment is skipped automatically.
+// Model names can be overridden with comma-separated env vars (see envList)
+// because free-tier catalogs change often.
 
-// Supports up to 3 keys: OPENROUTER_API_KEY, OPENROUTER_API_KEY_2, OPENROUTER_API_KEY_3.
-// Each key has its own independent rate limit quota.
-function buildClients() {
-  const keys = [
-    process.env.OPENROUTER_API_KEY,
-    process.env.OPENROUTER_API_KEY_2,
-    process.env.OPENROUTER_API_KEY_3,
-  ].filter(Boolean);
+const AI_TIMEOUT_MS     = Number(process.env.AI_TIMEOUT_MS)     || 40 * MS_PER_SECOND;
+const ANALYZE_TIMEOUT_MS = Number(process.env.AI_ANALYZE_TIMEOUT_MS) || 15 * MS_PER_SECOND; // short JSON reply
+const MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_TOKENS)     || 6000;
 
-  if (!keys.length) {
-    console.warn("[AI] ⚠️  No OPENROUTER_API_KEY found in environment.");
-    return [];
+// How long a failing model/key is skipped after an error
+const COOLDOWN_MS = {
+  rateLimit: 60 * MS_PER_SECOND,   // 429
+  server:    30 * MS_PER_SECOND,   // 5xx, timeouts, network
+  badModel:  30 * MS_PER_MINUTE,   // 404 — model name retired/wrong
+  badKey:    10 * MS_PER_MINUTE,   // 401 — key invalid or not activated (whole key skipped)
+  forbidden: 10 * MS_PER_MINUTE,   // 403 — usually this model is not allowed (only this model skipped)
+  badOutput: 0,                    // unparsable/empty reply — just try the next one
+};
+
+function envList(name, fallback) {
+  const raw = process.env[name];
+  if (!raw || !raw.trim()) return fallback;
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+const PROVIDER_DEFS = [
+  {
+    name:    "gemini",
+    baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+    keys:    [process.env.GEMINI_API_KEY],
+    models:  envList("GEMINI_MODELS", ["gemini-2.5-flash-lite", "gemini-2.5-flash","gemini-3.5-flash-lite"]),
+  },
+  {
+    name:    "groq",
+    baseURL: "https://api.groq.com/openai/v1",
+    keys:    [process.env.GROQ_API_KEY],
+    models:  envList("GROQ_MODELS", ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]),
+  },
+  {
+    name:    "mistral",
+    baseURL: "https://api.mistral.ai/v1",
+    keys:    [process.env.MISTRAL_API_KEY],
+    models:  envList("MISTRAL_MODELS", ["mistral-small-latest"]),
+  },
+  {
+    name:    "openrouter",
+    baseURL: "https://openrouter.ai/api/v1",
+    // Up to 3 OpenRouter keys; each key has its own rate-limit quota.
+    keys:    [
+      process.env.OPENROUTER_API_KEY,
+      process.env.OPENROUTER_API_KEY_2,
+      process.env.OPENROUTER_API_KEY_3,
+    ],
+    models:  envList("OPENROUTER_MODELS", [
+      "google/gemma-4-31b-it:free",
+      "google/gemma-4-26b-a4b-it:free",
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+    ]),
+  },
+];
+
+// Flatten providers × models × keys into an ordered list of "slots".
+function buildSlots() {
+  const slots = [];
+  for (const def of PROVIDER_DEFS) {
+    const keys = def.keys.filter(Boolean);
+    if (!keys.length) continue;
+
+    const clients = keys.map((apiKey) =>
+      new OpenAI({ baseURL: def.baseURL, apiKey, maxRetries: 0, timeout: AI_TIMEOUT_MS })
+    );
+
+    for (const model of def.models) {
+      clients.forEach((client, ki) => {
+        slots.push({
+          id:       `${def.name}/${model}${keys.length > 1 ? `#${ki + 1}` : ""}`,
+          keyId:    `${def.name}#${ki + 1}`,
+          provider: def.name,
+          model,
+          client,
+        });
+      });
+    }
   }
-
-  return keys.map((apiKey) =>
-    new OpenAI({ baseURL: "https://openrouter.ai/api/v1", apiKey })
-  );
+  return slots;
 }
 
 // Module-level singleton — built once when the module loads
-const CLIENTS = buildClients();
+const SLOTS = buildSlots();
+
+if (!SLOTS.length) {
+  console.warn("[AI] ⚠️  No AI provider keys found (GEMINI_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY / OPENROUTER_API_KEY).");
+} else {
+  const active = [...new Set(SLOTS.map((s) => s.provider))].join(" → ");
+  console.log(`[AI] Provider order: ${active}`);
+}
 
 // ── Session cache ──────────────────────────────────────────────────────────────
 
@@ -97,46 +165,181 @@ setInterval(() => {
 
 // ── AI helpers ─────────────────────────────────────────────────────────────────
 
-async function callAI(messages) {
-  let lastError;
+// slot id / key id -> timestamp until which it is skipped
+const cooldownUntil = new Map();
 
-  for (const model of MODELS) {
-    for (let ki = 0; ki < CLIENTS.length; ki++) {
-      const client = CLIENTS[ki];
-      const keyLabel = ki === 0 ? "primary" : `key-${ki + 1}`;
+function isCoolingDown(slot) {
+  const now = Date.now();
+  return (cooldownUntil.get(slot.id) || 0) > now || (cooldownUntil.get(slot.keyId) || 0) > now;
+}
+
+function startCooldown(slot, err) {
+  const status = err?.status;
+  if (status === 401) {
+    cooldownUntil.set(slot.keyId, Date.now() + COOLDOWN_MS.badKey);
+    return;
+  }
+  let ms = COOLDOWN_MS.server;
+  if (status === 403) {
+    ms = COOLDOWN_MS.forbidden;
+  } else if (status === 429) {
+    ms = COOLDOWN_MS.rateLimit;
+    const retryAfter = Number(err?.headers?.["retry-after"]);
+    if (retryAfter > 0) ms = Math.min(retryAfter * MS_PER_SECOND, 5 * MS_PER_MINUTE);
+  } else if (status === 404) {
+    ms = COOLDOWN_MS.badModel;
+  } else if (err?.code === "BAD_AI_OUTPUT") {
+    ms = COOLDOWN_MS.badOutput;
+  }
+  if (ms > 0) cooldownUntil.set(slot.id, Date.now() + ms);
+}
+
+// Asks for JSON mode first; if the provider rejects it (HTTP 400) retries the
+// same model once without it.
+async function createCompletion(slot, messages, maxTokens, timeoutMs) {
+  const base    = { model: slot.model, messages, max_tokens: maxTokens };
+  const options = timeoutMs ? { timeout: timeoutMs } : undefined;
+  try {
+    return await slot.client.chat.completions.create(
+      { ...base, response_format: { type: "json_object" } },
+      options
+    );
+  } catch (err) {
+    if (err?.status === 400) return slot.client.chat.completions.create(base, options);
+    throw err;
+  }
+}
+
+// Tries every provider/model in order and returns the first usable response.
+// If `parse` is given, the reply must also parse/validate — an unparsable reply
+// counts as a failure and the next provider is tried (instead of throwing later).
+async function callAI(messages, { parse, maxTokens = MAX_OUTPUT_TOKENS, timeoutMs } = {}) {
+  if (!SLOTS.length) {
+    throw new Error("No AI provider configured. Set GEMINI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY or OPENROUTER_API_KEY.");
+  }
+
+  let lastError;
+  const failures = [];
+
+  // Pass 1 skips slots that are cooling down. If that leaves nothing to try
+  // (everything recently failed), pass 2 tries them anyway.
+  for (const respectCooldown of [true, false]) {
+    let attempted = false;
+
+    for (const slot of SLOTS) {
+      if (respectCooldown && isCoolingDown(slot)) continue;
+      attempted = true;
 
       try {
-        const completion = await client.chat.completions.create({ model, messages });
-        const content = completion.choices[0]?.message?.content || "";
-        const usage = completion.usage || { prompt_tokens: 0, completion_tokens: 0 };
+        const completion = await createCompletion(slot, messages, maxTokens, timeoutMs);
+        const content    = completion.choices?.[0]?.message?.content || "";
+        if (!content.trim()) {
+          const e = new Error("empty response");
+          e.code = "BAD_AI_OUTPUT";
+          throw e;
+        }
 
-        console.log(`[AI] ✅ Success on ${keyLabel}/${model}`);
-        return { content, usage };
+        let parsed;
+        if (parse) {
+          try {
+            parsed = parse(content);
+          } catch (parseErr) {
+            parseErr.code = "BAD_AI_OUTPUT";
+            throw parseErr;
+          }
+        }
+
+        const usage = completion.usage || { prompt_tokens: 0, completion_tokens: 0 };
+        console.log(`[AI] ✅ Success on ${slot.id}`);
+        return { content, parsed, usage, provider: slot.id };
       } catch (err) {
         lastError = err;
-        console.warn(`[AI] ${keyLabel}/${model} failed: ${err.message}`);
+        failures.push(`${slot.id}${err?.status ? ` (${err.status})` : ""}: ${String(err.message).slice(0, 120)}`);
+        startCooldown(slot, err);
+        console.warn(`[AI] ${slot.id} failed${err?.status ? ` (${err.status})` : ""}: ${err.message}`);
       }
     }
+
+    if (attempted) break;
   }
-  throw new Error(`All AI models failed. Last error: ${lastError?.message || "Unknown error"}`);
+
+  console.error(`[AI] Every provider failed:\n  ${failures.join("\n  ")}`);
+  throw new Error(`All AI providers failed. Last error: ${lastError?.message || "Unknown error"}`);
+}
+
+// Escapes raw newlines/tabs/control characters that appear INSIDE JSON string
+// literals (models often put real line breaks in "content"), leaving the
+// whitespace between JSON tokens untouched.
+function escapeControlCharsInStrings(text) {
+  let out = "";
+  let inString = false;
+  let escaped  = false;
+
+  for (const ch of text) {
+    if (!inString) {
+      if (ch === '"') inString = true;
+      out += ch;
+      continue;
+    }
+    if (escaped)        { out += ch; escaped = false; continue; }
+    if (ch === "\\")    { out += ch; escaped = true;  continue; }
+    if (ch === '"')     { out += ch; inString = false; continue; }
+
+    const code = ch.charCodeAt(0);
+    if (code < 0x20 || code === 0x7f) {
+      out += ch === "\n" ? "\\n" : ch === "\r" ? "\\r" : ch === "\t" ? "\\t" : "";
+    } else {
+      out += ch;
+    }
+  }
+  return out;
 }
 
 function parseAIJson(raw) {
-  let cleaned = raw.replace(/```json|```/g, "").trim();
-  cleaned = cleaned.replace(/[\u0000-\u001F\u007F]/g, (char) => {
-    const escapes = { "\n": "\\n", "\r": "\\r", "\t": "\\t" };
-    return escapes[char] || "";
-  });
+  let cleaned = String(raw ?? "").replace(/^\uFEFF/, "").trim();
+
+  // Strip ```json fences
+  cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+
+  // Keep only the outermost {...} (drops any chatter before/after the JSON)
+  const start = cleaned.indexOf("{");
+  const end   = cleaned.lastIndexOf("}");
+  if (start !== -1 && end > start) cleaned = cleaned.slice(start, end + 1);
+
+  // 1. Valid JSON as-is
+  try { return JSON.parse(cleaned); } catch (_) { /* try repairs */ }
+
+  // 2. Valid once raw control characters inside strings are escaped
+  let firstError;
   try {
-    return JSON.parse(cleaned);
+    return JSON.parse(escapeControlCharsInStrings(cleaned));
   } catch (e) {
-    const titleMatch   = raw.match(/"title"\s*:\s*"([^"]+)"/);
-    const contentMatch = raw.match(/"content"\s*:\s*"([\s\S]+?)"\s*}/);
-    if (titleMatch && contentMatch) {
-      return { title: titleMatch[1], content: contentMatch[1].replace(/\\n/g, "\n") };
-    }
-    throw new Error(`AI returned unparseable response: ${e.message}`);
+    firstError = e;
   }
+
+  // 3. Last resort for unescaped inner quotes: pull title + content out by shape
+  const titleMatch = cleaned.match(/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const keyMatch   = cleaned.match(/"content"\s*:\s*"/);
+  if (titleMatch && keyMatch) {
+    const body      = cleaned.slice(keyMatch.index + keyMatch[0].length);
+    const lastQuote = body.lastIndexOf('"');
+    if (lastQuote > 0) {
+      const unescape = (s) => s.replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+      return { title: unescape(titleMatch[1]), content: unescape(body.slice(0, lastQuote)) };
+    }
+  }
+
+  throw new Error(`AI returned unparseable response: ${firstError.message}`);
+}
+
+// Parser for article replies: must contain a non-empty title and content.
+function parseArticleJson(raw) {
+  const parsed = parseAIJson(raw);
+  if (typeof parsed?.title !== "string" || typeof parsed?.content !== "string"
+      || !parsed.title.trim() || !parsed.content.trim()) {
+    throw new Error('AI reply is missing a non-empty "title" or "content"');
+  }
+  return parsed;
 }
 
 function countWords(text) {
@@ -290,22 +493,27 @@ async function _buildAndSaveArticle({
   let totalInputTokens  = initialInputTokens;
   let totalOutputTokens = initialOutputTokens;
 
-  const { content: raw, usage: u1 } = await callAI(buildMessages());
+  const { parsed: firstDraft, usage: u1 } = await callAI(buildMessages(), { parse: parseArticleJson });
   totalInputTokens  += u1.prompt_tokens     || 0;
   totalOutputTokens += u1.completion_tokens || 0;
 
-  let parsed    = parseAIJson(raw);
+  let parsed    = firstDraft;
   let wordCount = countWords(parsed.content);
 
   if (wordCount < lengthConfig.min || (articleLength !== "long" && wordCount > lengthConfig.max)) {
     const correction = wordCount < lengthConfig.min
       ? `IMPORTANT: Too short (${wordCount} words). Must be at least ${lengthConfig.min} words.\n`
       : `IMPORTANT: Too long (${wordCount} words). Must be under ${lengthConfig.max} words.\n`;
-    const { content: raw2, usage: u2 } = await callAI(buildMessages(correction));
-    totalInputTokens  += u2.prompt_tokens     || 0;
-    totalOutputTokens += u2.completion_tokens || 0;
-    parsed    = parseAIJson(raw2);
-    wordCount = countWords(parsed.content);
+    try {
+      const { parsed: corrected, usage: u2 } = await callAI(buildMessages(correction), { parse: parseArticleJson });
+      totalInputTokens  += u2.prompt_tokens     || 0;
+      totalOutputTokens += u2.completion_tokens || 0;
+      parsed    = corrected;
+      wordCount = countWords(parsed.content);
+    } catch (retryErr) {
+      // Keep the first draft rather than failing the whole request
+      console.warn(`[AI] Length-correction retry failed, keeping first draft: ${retryErr.message}`);
+    }
   }
 
   let logId = null;
@@ -357,8 +565,7 @@ async function analyzePrompt(userInput) {
     },
   ];
 
-  const { content: raw, usage } = await callAI(messages);
-  const parsed   = parseAIJson(raw);
+  const { parsed, usage } = await callAI(messages, { parse: parseAIJson, maxTokens: 2500, timeoutMs: ANALYZE_TIMEOUT_MS });
   const keywords = Array.isArray(parsed.keywords) ? parsed.keywords.slice(0, MAX_KEYWORDS_SELECTED) : [];
 
   const sessionId = uuidv4();
