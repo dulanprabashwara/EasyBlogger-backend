@@ -49,7 +49,7 @@ const authenticate = async (req, res, next) => {
       }
     }
 
-    if (user.role === "ADMIN") {
+    if (user.role === "ADMIN" || user.role === "SUPER_ADMIN") {
       const userAgent = req.headers['user-agent'] || 'Unknown Device';
       let deviceName = "Desktop Browser";
       if (userAgent.includes("Windows")) deviceName = "Windows PC";
@@ -128,6 +128,9 @@ const authorize = (...roles) => {
         message: "Authentication required.",
       });
     }
+    if (req.user.role === "SUPER_ADMIN") {
+      return next();
+    }
 
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({
@@ -151,7 +154,7 @@ const requirePremium = (req, res, next) => {
     });
   }
 
-  if (!req.user.isPremium && req.user.role !== "ADMIN") {
+  if (!req.user.isPremium && !["ADMIN", "SUPER_ADMIN"].includes(req.user.role)) {
     return res.status(403).json({
       success: false,
       message: "This feature requires a premium subscription.",

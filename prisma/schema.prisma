@@ -550,6 +550,7 @@ model ArticleInteractions {
 enum Role {
   USER
   ADMIN
+  SUPER_ADMIN
 }
 
 enum ArticleStatus {
@@ -663,4 +664,13 @@ model PlatformEvent {
   createdAt DateTime @default(now())
 
   @@index([createdAt])
+}
+
+model AdminInvitation {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  token     String   @unique
+  expiresAt DateTime
+  status    String   @default("PENDING") // PENDING, ACCEPTED, EXPIRED
+  createdAt DateTime @default(now())
 }
