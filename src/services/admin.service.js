@@ -322,7 +322,7 @@ const getReports = async ({ page = 1, limit = 20, status }) => {
       where,
       include: {
         article: {
-          select: { id: true, title: true, slug: true, authorId: true },
+          select: { id: true, title: true, slug: true, authorId: true, content: true, coverImage: true },
         },
         reporter: {
           select: { id: true, username: true },

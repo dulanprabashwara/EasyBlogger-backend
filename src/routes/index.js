@@ -30,11 +30,6 @@ const topUserArticleRoutes = require("./topUserArticles.routes");
 const supportRoutes = require("./support.routes");
 
 
-
-
-
-
-
 const router = Router();
 
 // ─── API Routes ─────────────────────────────
@@ -66,7 +61,6 @@ router.use("/articleStats", articleStatsRoutes);
 router.use("/userReports", userReportsRoutes);
 router.use("/topUserArticles", topUserArticleRoutes);
 router.use("/support", supportRoutes);
-
 
 
 

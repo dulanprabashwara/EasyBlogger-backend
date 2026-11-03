@@ -1,11 +1,11 @@
 const excludedKeywords = {
   "Global": [
-    "onlyfans", "dark web", "hitman", "buy drugs online", 
-    "white supremacist", "neo-nazi", "suicide methods", "sponsored post", "casino online","porn", "xxx","nsfw"
+    "dark web", "hitman", "buy drugs online", 
+    "white supremacist", "neo-nazi", "suicide methods", "sponsored post", "casino online",
   ],
   "Technology & Digital Life": [
     "ddos tutorial", "how to hack", "malware download", "ransomware source code", 
-    "cracked software", "keygen", "pirated", "deepfake porn", "undress ai"
+    "cracked software", "keygen", "pirated", "undress ai"
   ],
   "Business & Entrepreneurship": [
     "ponzi scheme", "pyramid scheme", "pump and dump", "unregistered securities", 

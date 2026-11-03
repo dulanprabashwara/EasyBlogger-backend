@@ -13,13 +13,13 @@ router.get('/engagement', authenticate, adminController.getEngagementAnalytics);
 // User management
 router.get("/users/paginated", adminController.getPaginatedUsers);
 router.get("/users", adminController.listUsers);
-router.put("/users/:userId/role", adminController.updateUserRole);
-router.post("/users/:userId/ban", adminController.banUser);
-router.delete("/users/:userId/ban", adminController.unbanUser);
+router.put("/users/:userId/role",authorize("SUPER_ADMIN"), adminController.updateUserRole);
+router.post("/users/:userId/ban",authorize("SUPER_ADMIN"), adminController.banUser);
+router.delete("/users/:userId/ban",authorize("SUPER_ADMIN"), adminController.unbanUser);
 
 // Reports / Moderation
 router.get("/reports", adminController.getReports);
-router.put("/reports/:reportId", adminController.resolveReport);
+router.put("/reports/:reportId", authorize("SUPER_ADMIN"), adminController.resolveReport);
 
 // Audit logs
 // Add this line to your routes file
@@ -62,5 +62,8 @@ router.put("/support-requests/:id", adminController.updateSupportRequest);
 //Dashboard feeds
 router.get("/dashboard/feeds", adminController.getDashboardFeeds);
 router.get("/dashboard/analytics-charts", adminController.getAnalyticsCharts);
+
+// Admin Invitations
+router.post("/invite", authorize("SUPER_ADMIN"), adminController.inviteAdmin);
 
 module.exports = router;

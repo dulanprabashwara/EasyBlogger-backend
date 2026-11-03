@@ -5,6 +5,8 @@ const adminService = require("../services/admin.service");
 const { parsePagination } = require("../utils/helpers");
 const { excludedKeywords } = require('../config/excludedKeywords');
 const prisma = require("../config/prisma");
+const nodemailer = require("nodemailer");
+const crypto = require("crypto");
 
 // ─── Dashboard ──────────────────────────────
 
@@ -242,9 +244,10 @@ const getPaginatedAuditLogs = async (req, res) => {
 
     // Filter by Action (Case-insensitive search)
     if (req.query.action && req.query.action !== 'All Actions' && req.query.action !== '') {
+      const dbActionFormat = req.query.action.replace(/ /g, '_').toUpperCase();
+
       whereClause.action = {
-        contains: req.query.action,
-        mode: 'insensitive' // So 'update' matches 'UPDATE_PROFILE'
+        equals: dbActionFormat
       };
     }
 
@@ -673,11 +676,30 @@ const getPaginatedSupportRequests = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    const whereClause = {};
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    let whereClause = {};
     
-    // Optional filter so can view only "PENDING" or "RESOLVED" tickets
-    if (req.query.status && req.query.status !== 'ALL') {
-      whereClause.status = req.query.status;
+    //Build dynamic filters based on the selected UI tab
+    if (req.query.status === 'PENDING') {
+      // Show ALL pending tickets, regardless of age
+      whereClause.status = 'PENDING';
+      
+    } else if (req.query.status === 'RESOLVED') {
+      // Show ONLY resolved tickets updated within the last 7 days
+      whereClause.status = 'RESOLVED';
+      whereClause.updatedAt = { gte: sevenDaysAgo }; 
+      
+    } else {
+      // 'ALL' Filter: Show ALL pending tickets OR recent resolved tickets
+      whereClause.OR = [
+        { status: 'PENDING' },
+        { 
+          status: 'RESOLVED',
+          updatedAt: { gte: sevenDaysAgo }
+        }
+      ];
     }
 
     const [totalRequests, requests] = await Promise.all([
@@ -803,6 +825,93 @@ const getAnalyticsCharts = asyncHandler(async (req, res) => {
   });
 });
 
+const inviteAdmin = async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required." });
+    }
+
+    // Check if the user is ALREADY registered and is an admin
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser && existingUser.role !== "USER") {
+      return res.status(400).json({ success: false, message: "User is already an Admin." });
+    }
+
+    // Generate required fields for your schema
+    const inviteToken = crypto.randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days from now
+
+    // Save the invitation to your existing table
+    await prisma.adminInvitation.upsert({
+      where: { email },
+      update: {
+        token: inviteToken,
+        expiresAt: expiresAt,
+        status: "PENDING" // Reset to pending if we are resending the invite
+      },
+      create: { 
+        email,
+        token: inviteToken,
+        expiresAt: expiresAt
+      },
+    });
+
+    //Configure email transporter
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: 587,
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
+
+    //Create the email content 
+    // (We can optionally append the token to the URL if you ever want to build a custom welcome page later)
+    const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`; 
+    
+    const mailOptions = {
+      from: `"Easy Blogger Admin" <${process.env.SMTP_USER}>`, 
+      to: email, 
+      subject: "Invitation to Join Easy Blogger Admin Panel",
+      html: `
+        <div style="font-family: 'Georgia', serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #E5E7EB; border-radius: 10px;">
+          <h2 style="color: #111827;">You've been invited!</h2>
+          <p style="color: #374151; font-family: sans-serif; line-height: 1.6;">
+            You have been invited to join the <strong>Easy Blogger</strong> platform as an Administrator.
+          </p>
+          <p style="color: #374151; font-family: sans-serif; line-height: 1.6;">
+            To accept this invitation, simply log in or create an account using this email address. Your account will automatically be upgraded to Admin status.
+          </p>
+          <p style="color: #374151; font-family: sans-serif; line-height: 1.6;">
+            <em>Note: This invitation will expire in 7 days.</em>
+          </p>
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${loginUrl}" style="background-color: #1ABC9C; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; font-family: sans-serif; display: inline-block;">
+              Log In / Sign Up
+            </a>
+          </div>
+        </div>
+      `,
+    };
+
+    //Send the email
+    await transporter.sendMail(mailOptions);
+
+    return res.status(200).json({ 
+      success: true, 
+      message: `Invitation successfully sent and recorded for ${email}` 
+    });
+    
+  } catch (error) {
+    console.error("Failed to send admin invitation:", error);
+    return res.status(500).json({ success: false, message: "Failed to process invitation." });
+  }
+};
+
 module.exports = {
   getDashboard,
   getEngagementAnalytics,
@@ -839,4 +948,5 @@ module.exports = {
   getPaginatedSupportRequests,
   getDashboardFeeds,
   getAnalyticsCharts,
+  inviteAdmin,
 };
