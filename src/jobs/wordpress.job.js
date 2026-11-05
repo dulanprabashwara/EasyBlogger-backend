@@ -102,12 +102,12 @@ const _executeJob = async (jobId) => {
       _timeouts.delete(retryKey);
       await _cancelJob(
         jobId,
-        `Article was not PUBLISHED 3 minutes after scheduled time (status: "${job.article.status}"). Cancelled to prevent orphan content.`
+        `Article was not PUBLISHED 1 minute after scheduled time (status: "${job.article.status}"). Cancelled to prevent orphan content.`
       );
       console.warn(`[WordPress Scheduler] ⛔ Cancelled ${jobId} after retry.`);
     } else {
-      console.log(`[WordPress Scheduler] Article not PUBLISHED yet — retrying in 3 minutes.`);
-      _timeouts.set(retryKey, setTimeout(() => _executeJob(jobId), 3 * 60 * 1000));
+      console.log(`[WordPress Scheduler] Article not PUBLISHED yet — retrying in 1 minute.`);
+      _timeouts.set(retryKey, setTimeout(() => _executeJob(jobId), 1 * 60 * 1000));
     }
   }
 };
