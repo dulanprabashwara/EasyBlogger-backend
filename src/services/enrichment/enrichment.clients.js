@@ -24,6 +24,7 @@ const ENRICHMENT_MODELS = [
 // Each key has its own independent rate limit quota.
 function buildClients() {
   const keys = [
+    process.env.OPENROUTER_API_KEY_RECOMMENDATION,
     process.env.OPENROUTER_API_KEY,
     process.env.OPENROUTER_API_KEY_2,
     process.env.OPENROUTER_API_KEY_3,
