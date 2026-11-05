@@ -111,14 +111,14 @@ const _executeJob = async (jobId) => {
   const handled = await _runPublish(jobId, job.article, job.liConnection, job.caption);
 
   if (!handled) {
-    // Retry once after 10 seconds
+    // Retry once after 1 minute
     const retryKey = `${jobId}_retry`;
     if (_timeouts.has(retryKey)) {
       _timeouts.delete(retryKey);
-      await _cancelJob(jobId, "Article was not PUBLISHED 10 seconds after scheduled time.");
+      await _cancelJob(jobId, "Article was not PUBLISHED 1 minute after scheduled time.");
     } else {
-      console.log(`[LinkedIn Scheduler] Article not PUBLISHED yet — retrying in 10 seconds.`);
-      _timeouts.set(retryKey, setTimeout(() => _executeJob(jobId), 10 * 1000));
+      console.log(`[LinkedIn Scheduler] Article not PUBLISHED yet — retrying in 1 minute.`);
+      _timeouts.set(retryKey, setTimeout(() => _executeJob(jobId), 60 * 1000));
     }
   }
 };
